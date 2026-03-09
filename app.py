@@ -6,23 +6,25 @@ import shutil
 from flask import Flask, request, render_template, send_file, flash, redirect, url_for
 from werkzeug.utils import secure_filename
 from PIL import Image, ImageCms
-# Importujemy new_session, aby móc ręcznie zmienić wagi modelu AI
 from rembg import remove, new_session
 
 app = Flask(__name__)
 app.secret_key = 'super-secret-professional-key-2026'
 
+# [KLUCZOWA ZMIANA ARCHITEKTONICZNA] 
+# Globalna inicjalizacja silnika IS-Net. Model ważący 179MB zostaje załadowany do pamięci RAM 
+# tylko JEDEN RAZ podczas uruchamiania serwera. Eliminuje to błąd 502 Bad Gateway i zapychanie pamięci.
+print("Inicjalizacja globalnego modelu AI IS-Net...")
+GLOBAL_AI_SESSION = new_session("isnet-general-use")
+print("Model AI załadowany pomyślnie.")
+
 class PackshotProcessor:
     def __init__(self):
         self.srgb_profile = ImageCms.createProfile("sRGB")
-        # Zmiana domyślnego modelu u2net na wysoce precyzyjny isnet-general-use
-        # Jest to model znacznie lepiej radzący sobie z mikrokontrastami i wieloma obiektami
-        self.ai_session = new_session("isnet-general-use")
+        self.ai_session = GLOBAL_AI_SESSION
 
     def remove_background(self, input_data):
         try:
-            # Włączenie Alpha Matting (ochrona białych krawędzi na jasnym tle) 
-            # oraz Post Process (ochrona oddzielnych, mniejszych elementów jak saszetki)
             output_data = remove(
                 input_data,
                 session=self.ai_session,
