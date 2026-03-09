@@ -1,8 +1,19 @@
 import os
+
+# --- KRYTYCZNA OPTYMALIZACJA PAMIĘCI RAM (OS LEVEL) ---
+# Blokujemy bibliotekom matematycznym C/C++ alokację dodatkowych gigabajtów RAM
+# Zmuszamy środowisko do operowania w trybie jednowątkowym (chroni przed OOM Killerem na Renderze)
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+
 import io
 import zipfile
 import tempfile
 import shutil
+import gc  # Garbage Collector
 from flask import Flask, request, render_template, send_file, flash, redirect, url_for
 from werkzeug.utils import secure_filename
 from PIL import Image, ImageCms
@@ -11,9 +22,6 @@ from rembg import remove, new_session
 app = Flask(__name__)
 app.secret_key = 'super-secret-professional-key-2026'
 
-# [KLUCZOWA ZMIANA ARCHITEKTONICZNA] 
-# Globalna inicjalizacja silnika IS-Net. Model ważący 179MB zostaje załadowany do pamięci RAM 
-# tylko JEDEN RAZ podczas uruchamiania serwera. Eliminuje to błąd 502 Bad Gateway i zapychanie pamięci.
 print("Inicjalizacja globalnego modelu AI IS-Net...")
 GLOBAL_AI_SESSION = new_session("isnet-general-use")
 print("Model AI załadowany pomyślnie.")
@@ -25,8 +33,23 @@ class PackshotProcessor:
 
     def remove_background(self, input_data):
         try:
+            # 1. RAM GUARD: Otwieramy zdjęcie w locie
+            img = Image.open(io.BytesIO(input_data)).convert("RGBA")
+            
+            # 2. Jeśli zdjęcie jest zbyt duże dla Alpha Matting (powyżej 1600px dłuższego boku), 
+            # skalujemy je w dół algorytmem Lanczos, aby nie wysadzić 2GB RAM.
+            max_ai_dim = 1600
+            if img.width > max_ai_dim or img.height > max_ai_dim:
+                img.thumbnail((max_ai_dim, max_ai_dim), Image.Resampling.LANCZOS)
+            
+            # Zapis do bufora na potrzeby AI
+            img_byte_arr = io.BytesIO()
+            img.save(img_byte_arr, format='PNG')
+            optimized_input_data = img_byte_arr.getvalue()
+
+            # 3. Zaawansowane szparowanie IS-Net z uwzględnieniem przezroczystości (Alpha Matting)
             output_data = remove(
-                input_data,
+                optimized_input_data,
                 session=self.ai_session,
                 post_process_mask=True,
                 alpha_matting=True,
@@ -34,7 +57,16 @@ class PackshotProcessor:
                 alpha_matting_background_threshold=10,
                 alpha_matting_erode_size=5
             )
-            return Image.open(io.BytesIO(output_data)).convert("RGBA")
+            
+            result_img = Image.open(io.BytesIO(output_data)).convert("RGBA")
+            
+            # 4. Agresywne zwalnianie zablokowanej pamięci (Garbage Collection)
+            del optimized_input_data
+            del output_data
+            gc.collect()
+            
+            return result_img
+            
         except Exception as e:
             print(f"Błąd krytyczny AI podczas szparowania: {e}")
             return None
@@ -54,7 +86,6 @@ class PackshotProcessor:
         paste_x = (target_size - new_w) // 2
         paste_y = (target_size - new_h) // 2
         
-        # Wklejanie z użyciem maski alfa w celu zachowania idealnie gładkich krawędzi wygenerowanych przez Alpha Matting
         canvas.paste(resized_img, (paste_x, paste_y), resized_img)
         return canvas
 
@@ -125,22 +156,22 @@ def process_images():
 
             img_cropped = processor.crop_to_content(img_no_bg)
 
-            # Allegro
+            # E-commerce platform mapping
             img_allegro = processor.create_platform_image(img_cropped, 2560, 0.90)
             processor.save_image_with_size_limit(img_allegro, os.path.join(dirs['allegro'], f"{base_name}_allegro.jpg"), 20)
 
-            # Amazon
             img_amazon = processor.create_platform_image(img_cropped, 3000, 0.95)
             amazon_name = f"{asin_prefix}_{base_name}.MAIN.jpg" if asin_prefix else f"{base_name}.MAIN.jpg"
             processor.save_image_with_size_limit(img_amazon, os.path.join(dirs['amazon'], amazon_name), 9.5)
 
-            # eMag
             img_emag = processor.create_platform_image(img_cropped, 3000, 0.85)
             processor.save_image_with_size_limit(img_emag, os.path.join(dirs['emag'], f"{base_name}_emag.jpg"), 7.5)
 
-            # Kaufland
             img_kaufland = processor.create_platform_image(img_cropped, 2048, 0.95)
             processor.save_image_with_size_limit(img_kaufland, os.path.join(dirs['kaufland'], f"{base_name}_kaufland.jpg"), 9.5)
+            
+            # Wymuszenie czyszczenia po KAŻDYM zdjęciu
+            gc.collect()
 
         shutil.make_archive(output_zip_path.replace('.zip', ''), 'zip', temp_dir)
 
@@ -153,6 +184,8 @@ def process_images():
         shutil.rmtree(temp_dir, ignore_errors=True)
         if os.path.exists(output_zip_path):
             os.remove(output_zip_path)
+        # Finalne sprzątanie RAMu po paczce
+        gc.collect()
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)), debug=False)
