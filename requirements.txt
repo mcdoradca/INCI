@@ -1,9 +1,6 @@
-Flask==3.0.0
-gunicorn==21.2.0
-Werkzeug==3.0.1
-rembg==2.0.53
-Pillow==10.2.0
-onnxruntime==1.17.1
-numpy<2.0.0
-scipy<1.13.0
-opencv-python-headless==4.9.0.80
+Flask>=3.0.0
+waitress>=3.0.0
+Werkzeug>=3.0.1
+rembg>=2.0.72
+Pillow>=10.2.0
+onnxruntime>=1.18.0
