@@ -1,8 +1,6 @@
 import os
 
 # --- KRYTYCZNA OPTYMALIZACJA PAMIĘCI RAM (OS LEVEL) ---
-# Blokujemy bibliotekom matematycznym C/C++ alokację dodatkowych gigabajtów RAM
-# Zmuszamy środowisko do operowania w trybie jednowątkowym (chroni przed konfliktami OpenMP)
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
@@ -13,8 +11,9 @@ import io
 import zipfile
 import tempfile
 import shutil
-import gc  # Garbage Collector
-from flask import Flask, request, render_template, send_file, flash, redirect, url_for
+import gc
+import urllib.parse
+from flask import Flask, request, render_template, send_file, jsonify
 from werkzeug.utils import secure_filename
 from PIL import Image, ImageCms
 from rembg import remove, new_session
@@ -22,9 +21,6 @@ from rembg import remove, new_session
 app = Flask(__name__)
 app.secret_key = 'super-secret-professional-key-2026'
 
-# --- LENIWA INICJALIZACJA (LAZY LOADING) ---
-# Naprawia krytyczny błąd "Terminating: fork() called from a process already using GNU OpenMP"
-# Model AI nie jest ładowany w momencie czytania pliku przez system, ale dopiero w momencie wywołania.
 GLOBAL_AI_SESSION = None
 
 def get_ai_session():
@@ -42,24 +38,19 @@ class PackshotProcessor:
 
     def remove_background(self, input_data):
         try:
-            # 1. RAM GUARD: Otwieramy zdjęcie w locie
             img = Image.open(io.BytesIO(input_data)).convert("RGBA")
             
-            # 2. Optymalizacja pamięciowa dla Alpha Matting
             max_ai_dim = 960
             if img.width > max_ai_dim or img.height > max_ai_dim:
                 img.thumbnail((max_ai_dim, max_ai_dim), Image.Resampling.LANCZOS)
             
-            # Zapis do bufora na potrzeby AI
             img_byte_arr = io.BytesIO()
             img.save(img_byte_arr, format='PNG')
             optimized_input_data = img_byte_arr.getvalue()
 
-            # ZWOLNIENIE PAMIĘCI PO SUROWYM ZDJĘCIU ZANIM URUCHOMIMY SIECI NEURONOWE
             del img
             gc.collect()
 
-            # 3. Zaawansowane szparowanie IS-Net z uwzględnieniem przezroczystości (Alpha Matting)
             output_data = remove(
                 optimized_input_data,
                 session=self.ai_session,
@@ -72,7 +63,6 @@ class PackshotProcessor:
             
             result_img = Image.open(io.BytesIO(output_data)).convert("RGBA")
             
-            # 4. Agresywne zwalnianie zablokowanej pamięci wewnętrznej po zakończeniu pracy algorytmu
             del optimized_input_data
             del output_data
             del img_byte_arr
@@ -132,20 +122,34 @@ def index():
 @app.route('/process', methods=['POST'])
 def process_images():
     if 'files' not in request.files:
-        flash('Nie wybrano plików.')
-        return redirect(url_for('index'))
+        return jsonify({'error': 'Nie wybrano plików.'}), 400
 
     files = request.files.getlist('files')
     asin_prefix = request.form.get('asin', '').strip().replace(" ", "-")
 
     if not files or files[0].filename == '':
-        flash('Brak plików do przetworzenia.')
-        return redirect(url_for('index'))
+        return jsonify({'error': 'Brak plików do przetworzenia.'}), 400
+
+    # DYNAMICZNE POBIERANIE NAZWY FOLDERU
+    folder_name = "Packshoty"
+    first_file_path = files[0].filename
+    if '/' in first_file_path:
+        folder_name = first_file_path.split('/')[0]
+    elif '\\' in first_file_path:
+        folder_name = first_file_path.split('\\')[0]
+
+    # Zabezpieczamy nazwę przed znakami specjalnymi, ale zostawiamy litery, cyfry i spacje
+    safe_folder_name = "".join(c for c in folder_name if c.isalnum() or c in (' ', '-', '_')).strip()
+    if not safe_folder_name:
+        safe_folder_name = "Gotowe_Zdjecia"
+
+    # Tworzymy ostateczną nazwę pliku ZIP
+    zip_download_name = f"{safe_folder_name}_packshot.zip"
 
     processor = PackshotProcessor()
     
     temp_dir = tempfile.mkdtemp()
-    output_zip_path = os.path.join(tempfile.gettempdir(), f"Packshots_2026_{os.urandom(4).hex()}.zip")
+    output_zip_path = os.path.join(tempfile.gettempdir(), f"Temp_{os.urandom(4).hex()}.zip")
 
     try:
         dirs = {
@@ -161,7 +165,11 @@ def process_images():
             if not file.filename.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.tiff')):
                 continue
 
-            base_name = os.path.splitext(secure_filename(file.filename))[0]
+            # secure_filename ucięłoby nam polskie znaki, zostawiamy oryginalną nazwę bazową bezpiecznie zakodowaną
+            base_name = os.path.splitext(os.path.basename(file.filename))[0]
+            # Podstawowe czyszczenie dla bezpieczeństwa zapisu na dysku
+            base_name = "".join(c for c in base_name if c.isalnum() or c in (' ', '-', '_')).strip()
+            
             input_data = file.read()
 
             img_no_bg = processor.remove_background(input_data)
@@ -169,7 +177,7 @@ def process_images():
 
             img_cropped = processor.crop_to_content(img_no_bg)
 
-            # E-commerce platform mapping
+            # Algorytmy platform
             img_allegro = processor.create_platform_image(img_cropped, 2560, 0.90)
             processor.save_image_with_size_limit(img_allegro, os.path.join(dirs['allegro'], f"{base_name}_allegro.jpg"), 20)
 
@@ -183,7 +191,6 @@ def process_images():
             img_kaufland = processor.create_platform_image(img_cropped, 2048, 0.95)
             processor.save_image_with_size_limit(img_kaufland, os.path.join(dirs['kaufland'], f"{base_name}_kaufland.jpg"), 9.5)
             
-            # Wymuszenie czyszczenia po KAŻDYM zdjęciu
             gc.collect()
 
         shutil.make_archive(output_zip_path.replace('.zip', ''), 'zip', temp_dir)
@@ -191,13 +198,19 @@ def process_images():
         with open(output_zip_path, 'rb') as f:
             return_data = io.BytesIO(f.read())
         
-        return send_file(return_data, mimetype='application/zip', as_attachment=True, download_name='Gotowe_Packshoty_2026.zip')
+        # urllib.parse.quote zabezpiecza polskie znaki w nazwie pobieranego pliku ZIP
+        encoded_filename = urllib.parse.quote(zip_download_name)
+        
+        response = send_file(return_data, mimetype='application/zip', as_attachment=True, download_name=zip_download_name)
+        # Dodajemy nagłówki, by skrypt z index.html mógł odczytać dokładną nazwę
+        response.headers['Content-Disposition'] = f"attachment; filename*=UTF-8''{encoded_filename}"
+        response.headers['Access-Control-Expose-Headers'] = 'Content-Disposition'
+        return response
 
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
         if os.path.exists(output_zip_path):
             os.remove(output_zip_path)
-        # Finalne sprzątanie RAMu po paczce
         gc.collect()
 
 if __name__ == '__main__':
