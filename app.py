@@ -2,7 +2,7 @@ import os
 
 # --- KRYTYCZNA OPTYMALIZACJA PAMIĘCI RAM (OS LEVEL) ---
 # Blokujemy bibliotekom matematycznym C/C++ alokację dodatkowych gigabajtów RAM
-# Zmuszamy środowisko do operowania w trybie jednowątkowym (chroni przed OOM Killerem na Renderze)
+# Zmuszamy środowisko do operowania w trybie jednowątkowym (chroni przed konfliktami OpenMP)
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
@@ -22,15 +22,23 @@ from rembg import remove, new_session
 app = Flask(__name__)
 app.secret_key = 'super-secret-professional-key-2026'
 
-print("Inicjalizacja globalnego modelu AI IS-Net (Zabezpieczenie CPU)...")
-# Wymuszamy CPUExecutionProvider, by ONNX nie rezerwował zbędnej pamięci VRAM/RAM pod nieistniejące GPU w chmurze
-GLOBAL_AI_SESSION = new_session("isnet-general-use", providers=['CPUExecutionProvider'])
-print("Model AI załadowany pomyślnie.")
+# --- LENIWA INICJALIZACJA (LAZY LOADING) ---
+# Naprawia krytyczny błąd "Terminating: fork() called from a process already using GNU OpenMP"
+# Model AI nie jest ładowany w momencie czytania pliku przez system, ale dopiero w momencie wywołania.
+GLOBAL_AI_SESSION = None
+
+def get_ai_session():
+    global GLOBAL_AI_SESSION
+    if GLOBAL_AI_SESSION is None:
+        print("Inicjalizacja globalnego modelu AI IS-Net (Zabezpieczenie CPU)...")
+        GLOBAL_AI_SESSION = new_session("isnet-general-use", providers=['CPUExecutionProvider'])
+        print("Model AI załadowany pomyślnie.")
+    return GLOBAL_AI_SESSION
 
 class PackshotProcessor:
     def __init__(self):
         self.srgb_profile = ImageCms.createProfile("sRGB")
-        self.ai_session = GLOBAL_AI_SESSION
+        self.ai_session = get_ai_session()
 
     def remove_background(self, input_data):
         try:
@@ -38,10 +46,6 @@ class PackshotProcessor:
             img = Image.open(io.BytesIO(input_data)).convert("RGBA")
             
             # 2. Optymalizacja pamięciowa dla Alpha Matting
-            # Algorytm PyMatting używany przez rembg tworzy gigantyczną macierz grafu dla każdego piksela.
-            # Wymiar 1600px generował macierz zajmującą 1.7GB RAM, co fizycznie przekraczało limity serwera 2GB.
-            # Ograniczenie do 960px zmniejsza zapotrzebowanie na RAM do bezpiecznych ~700MB, 
-            # jednocześnie zachowując perfekcyjną precyzję krawędzi dla nowoczesnego modelu IS-Net.
             max_ai_dim = 960
             if img.width > max_ai_dim or img.height > max_ai_dim:
                 img.thumbnail((max_ai_dim, max_ai_dim), Image.Resampling.LANCZOS)
