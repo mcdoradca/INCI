@@ -1,8 +1,0 @@
-pycache/
-*.py[cod]
-*$py.class
-venv/
-env/
-.env
-*.zip
-.DS_Store
